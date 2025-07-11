@@ -2,7 +2,7 @@ module tb_dma_axi_wrapper
   import amba_axi_pkg::*;
   import dma_pkg::*;
 ;
-  localparam TEST_LEN                         = 256;
+  localparam BURST_LEN                        = 'd256;
   localparam EPOCH                            = 20;
   localparam TEST_SIZE                        = 5;
   localparam [`AXI_ADDR_WIDTH-1:0] TEST_ADDR0 = `AXI_ADDR_WIDTH'h0000_0000; 
@@ -46,6 +46,13 @@ module tb_dma_axi_wrapper
     DMA_ON_RFWI,
     DMA_ON_RFWF
   } dma_mode_t;
+
+  typedef enum logic [1:0]{
+    DMA_OFF   ,
+    DMA_ON    ,
+    DMA_ABORT ,
+    DMA_RESERV
+  } dma_ctrl_t;
 
   dma_axi_wrapper #(
     .DMA_ID_VAL(0)
@@ -114,6 +121,7 @@ module tb_dma_axi_wrapper
       "test_dma_error": test_dma_error();
       "test_dma_abort": test_dma_abort();
       "test_dma_modes": test_dma_modes();
+      "test_dma_trans_byte": test_dma_trans_byte();
       default: $error("Unknown test case");
     endcase
     $display("\n[PASS] Test %s completed\n", test_name);
@@ -126,7 +134,8 @@ module tb_dma_axi_wrapper
     #20 
     rst = 0;  
     progress = 0;
-    run_test("test_dma_csrs");
+    run_test("test_dma_trans_byte");
+    // run_test("test_dma_csrs");
     progress = 1;
     run_test("test_dma_single_desc");  
     progress = 2;
@@ -188,6 +197,18 @@ module tb_dma_axi_wrapper
     axi_lite_write(desc_base + 32'h50, mode);
   endtask
 
+task automatic config_dma_ctrl(
+    input dma_ctrl_t dma_ctrl, 
+    input logic [7:0] axi_burst
+);
+    logic [9:0] ctrl_word; 
+
+    ctrl_word[0]   = (dma_ctrl == DMA_ON)    ? 1'b1 : 1'b0;
+    ctrl_word[1]   = (dma_ctrl == DMA_ABORT) ? 1'b1 : 1'b0;
+    ctrl_word[9:2] = axi_burst - 'h1;
+  
+    axi_lite_write(32'h0000, {22'h0, ctrl_word}); 
+endtask
     
 //-------------------------------------------------------------
 // test task group
@@ -251,7 +272,7 @@ module tb_dma_axi_wrapper
         mem_inst.mem[TEST_ADDR0/(`AXI_DATA_WIDTH/8) + i] = i % {`AXI_DATA_WIDTH{1'b1}};
 
       config_dma_desc(0, TEST_ADDR0, TEST_ADDR1, test_len[epoch % TEST_SIZE], DMA_ON_RIWI);
-      axi_lite_write(32'h0000, 32'h3fd); //10'b11_1111_1101,max brust length 256,start dma
+      config_dma_ctrl(DMA_ON,BURST_LEN);
 
       wait_for_irq(error);
       if (error) begin
@@ -259,12 +280,39 @@ module tb_dma_axi_wrapper
         $finish();
       end else begin
         check_data(TEST_ADDR0, TEST_ADDR1, test_len[epoch % TEST_SIZE], DMA_ON_RIWI);
-        axi_lite_write(32'h0000, 32'h3fc); //10'b11_1111_1100,max brust length 256,stop dma
+        config_dma_ctrl(DMA_OFF,BURST_LEN);
       end
       // reset memory
       for (int i=0; i<test_len[epoch % TEST_SIZE]/(`AXI_DATA_WIDTH/8); i++)
         mem_inst.mem[TEST_ADDR1/(`AXI_DATA_WIDTH/8) + i] = 'b0;
     end
+  endtask
+
+  task test_dma_trans_byte();
+    int byte_num;
+    for(byte_num = 32'd1024 * 302; ;byte_num += (`AXI_DATA_WIDTH)) begin
+      for (int i=0; i<byte_num/(`AXI_DATA_WIDTH/8); i++)
+        mem_inst.mem[TEST_ADDR0/(`AXI_DATA_WIDTH/8) + i] = i % {`AXI_DATA_WIDTH{1'b1}};
+
+      config_dma_desc(0, TEST_ADDR0, TEST_ADDR1, byte_num, DMA_ON_RIWI);
+      config_dma_ctrl(DMA_ON,BURST_LEN);
+
+      wait_for_irq(error);
+      if (error) begin
+        $display("[Test End] max transfer data = %d B",byte_num);
+        $finish();
+      end else begin
+        check_data(TEST_ADDR0, TEST_ADDR1, byte_num, DMA_ON_RIWI);
+        config_dma_ctrl(DMA_OFF,BURST_LEN);
+      end
+      // reset memory
+      for (int i=0; i<byte_num/(`AXI_DATA_WIDTH/8); i++)
+        mem_inst.mem[TEST_ADDR1/(`AXI_DATA_WIDTH/8) + i] = 'b0;
+
+      $display("[Test Running] transfer data = %d KB",byte_num / 1024);
+      // $display("[Test Running] transfer data = %d B",byte_num);
+    end
+    
   endtask
 
   task test_dma_full_desc();
@@ -274,7 +322,7 @@ module tb_dma_axi_wrapper
 
       config_dma_desc(0, TEST_ADDR2, TEST_ADDR3, test_len[epoch % TEST_SIZE], DMA_ON_RIWI);
       config_dma_desc(1, TEST_ADDR2 + ADDR_BIAS, TEST_ADDR3 + ADDR_BIAS, test_len[epoch % TEST_SIZE], DMA_ON_RIWI);
-      axi_lite_write(32'h0000, 32'h3fd); //10'b11_1111_1101,max brust length 256,start dma
+      config_dma_ctrl(DMA_ON,BURST_LEN);
       
       wait_for_irq(error);  // channel 0 done
       if (error) begin
@@ -284,7 +332,7 @@ module tb_dma_axi_wrapper
         check_data(TEST_ADDR2, TEST_ADDR3, test_len[epoch % TEST_SIZE], DMA_ON_RIWI);
         check_data(TEST_ADDR2 + ADDR_BIAS,TEST_ADDR3 + ADDR_BIAS, test_len[epoch % TEST_SIZE], DMA_ON_RIWI);
         config_dma_desc(1, TEST_ADDR2 + ADDR_BIAS, TEST_ADDR3 + ADDR_BIAS, test_len[epoch % TEST_SIZE], DMA_OFF_RIWI);
-        axi_lite_write(32'h0000, 32'h3fc); //10'b11_1111_1100,max brust length 256,stop dma
+        config_dma_ctrl(DMA_OFF,BURST_LEN);
       end
 
       for (int i=0; i<test_len[epoch % TEST_SIZE]/(`AXI_DATA_WIDTH/8)*4; i++)
@@ -298,10 +346,10 @@ module tb_dma_axi_wrapper
       for (int i=0; i<test_len[epoch % TEST_SIZE]/(`AXI_DATA_WIDTH/8)*4; i++)
         mem_inst.mem[TEST_ADDR4/(`AXI_DATA_WIDTH/8) + i] = i % {`AXI_DATA_WIDTH{1'b1}};
 
-      config_dma_desc(0, TEST_ADDR4, TEST_ADDR5, TEST_LEN, DMA_ON_RIWI);
-      axi_lite_write(32'h0000, 32'h3fd); //10'b11_1111_1101,max brust length 256,start dma
+      config_dma_desc(0, TEST_ADDR4, TEST_ADDR5, test_len[epoch % TEST_SIZE], DMA_ON_RIWI);
+      config_dma_ctrl(DMA_ON,BURST_LEN);
       #($urandom_range(30,80))
-      axi_lite_write(32'h0000, 32'h3ff); //10'b11_1111_1110,max brust length 256,abort dma
+      config_dma_ctrl(DMA_ABORT,BURST_LEN);
       for (int i=0; i<test_len[epoch % TEST_SIZE]/(`AXI_DATA_WIDTH/8); i++) begin
         if (mem_inst.mem[TEST_ADDR5/(`AXI_DATA_WIDTH/8)+i] !== mem_inst.mem[TEST_ADDR4/(`AXI_DATA_WIDTH/8)+i]) begin
           $display("Data mismatch @%h: Exp=%h, Act=%h, epoch=%d", 
@@ -320,7 +368,7 @@ module tb_dma_axi_wrapper
       //   check_data(TEST_ADDR4, TEST_ADDR5, test_len[epoch % TEST_SIZE], DMA_ON_RIWI);
       // end
       // ---------------------------------------------
-      axi_lite_write(32'h0000, 32'h3fc); //10'b11_1111_1100,max brust length 256,stop dma
+      config_dma_ctrl(DMA_OFF,BURST_LEN);
       if(error_count == 0)begin
         $display("[Test Fail] test_dma_abort fail, epoch=%d",epoch + 1);
         $finish();
@@ -343,7 +391,7 @@ module tb_dma_axi_wrapper
                (epoch % 4 == 2) ? DMA_ON_RIWF :
                (epoch % 4 == 3) ? DMA_ON_RFWF : DMA_ON_RIWI;
         config_dma_desc(0, TEST_ADDR8, TEST_ADDR9, test_len[epoch % TEST_SIZE], mode);
-        axi_lite_write(32'h0000, 32'h3fd); //10'b11_1111_1101,max brust length 256,start dma
+        config_dma_ctrl(DMA_ON,BURST_LEN);
 
         wait_for_irq(error);
         if (error) begin
@@ -351,7 +399,7 @@ module tb_dma_axi_wrapper
           $finish();
         end else begin
           check_data(TEST_ADDR8, TEST_ADDR9, test_len[epoch % TEST_SIZE], mode);
-          axi_lite_write(32'h0000, 32'h3fc); //10'b11_1111_1100,max brust length 256,stop dma
+          config_dma_ctrl(DMA_OFF,BURST_LEN);
         end
 
         for (int i=0; i<test_len[epoch % TEST_SIZE]/(`AXI_DATA_WIDTH/8); i++)
@@ -367,7 +415,7 @@ module tb_dma_axi_wrapper
           mem_inst.mem[TEST_ADDR6/(`AXI_DATA_WIDTH/8) + i] = i % {`AXI_DATA_WIDTH{1'b1}};
           
       config_dma_desc(0, TEST_ADDR6, TEST_ADDR7, test_len[epoch % TEST_SIZE], DMA_ON_RIWI);
-      axi_lite_write(32'h0000, 32'h3fd); //10'b11_1111_1101,max brust length 256,start dma
+      config_dma_ctrl(DMA_ON,BURST_LEN);
   
       if (error_type == 0) begin
         #($urandom_range(80,120));
@@ -389,7 +437,7 @@ module tb_dma_axi_wrapper
 
       release dma_m_miso_i.rresp;
       release dma_m_miso_i.bresp;
-      axi_lite_write(32'h0000, 32'h3fc); //10'b11_1111_1100,max brust length 256,stop dma
+      config_dma_ctrl(DMA_OFF,BURST_LEN);
 
       for (int i=0; i<test_len[epoch % TEST_SIZE] /(`AXI_DATA_WIDTH/8)*4; i++)
           mem_inst.mem[TEST_ADDR7/(`AXI_DATA_WIDTH/8) + i] = 'b0;
